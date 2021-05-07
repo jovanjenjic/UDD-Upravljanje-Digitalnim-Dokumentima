@@ -1,6 +1,8 @@
 package com.example.udd.services;
 
 import com.example.udd.dto.DocumentDTO;
+import com.example.udd.dto.SearchFieldDTO;
+import com.example.udd.enums.Operator;
 import com.example.udd.handlers.*;
 import com.example.udd.model.Book;
 import com.google.gson.Gson;
@@ -13,7 +15,10 @@ import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
+import org.elasticsearch.search.fetch.subphase.highlight.HighlightField;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.Resource;
@@ -24,12 +29,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.elasticsearch.common.text.Text;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.*;
 
 @Service
 public class BookService {
@@ -72,6 +79,93 @@ public class BookService {
         return new ResponseEntity<>(indexResponse, HttpStatus.CREATED);
     }
 
+    private BoolQueryBuilder retreiveQuery(HashMap<String, SearchFieldDTO> searchFields) {
+        Set<String> keys = searchFields.keySet();
+
+        /* Search for everything if nothing is provided */
+        if(keys.isEmpty()) {
+            return QueryBuilders.boolQuery().must(QueryBuilders.matchAllQuery());
+        }
+
+        BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
+
+        for(String key : keys) {
+            SearchFieldDTO searchFieldDTO = searchFields.get(key);
+
+            if(searchFieldDTO.getOperator().equals(Operator.MUST)) {
+                boolQueryBuilder.must(searchFieldDTO.isRegular() ?
+                        QueryBuilders.matchQuery(key, searchFieldDTO.getValue())
+                        :
+                        QueryBuilders.matchPhraseQuery(key, searchFieldDTO.getValue())
+                );
+                continue;
+            }
+            if(searchFieldDTO.getOperator().equals(Operator.SHOULD)) {
+                boolQueryBuilder.should(searchFieldDTO.isRegular() ?
+                        QueryBuilders.matchQuery(key, searchFieldDTO.getValue())
+                        :
+                        QueryBuilders.matchPhraseQuery(key, searchFieldDTO.getValue())
+                );
+                continue;
+            }
+            if(searchFieldDTO.getOperator().equals(Operator.MUST_NOT)) {
+                boolQueryBuilder.mustNot(searchFieldDTO.isRegular() ?
+                        QueryBuilders.matchQuery(key, searchFieldDTO.getValue())
+                        :
+                        QueryBuilders.matchPhraseQuery(key, searchFieldDTO.getValue())
+                );
+            }
+            continue;
+        }
+        return boolQueryBuilder;
+    }
+
+    public ResponseEntity<?> search(HashMap<String, SearchFieldDTO> searchFields) throws IOException {
+        SearchRequest searchRequest = new SearchRequest();
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
+        /* Bool query */
+        BoolQueryBuilder boolQueryBuilder = retreiveQuery(searchFields);
+
+        /* Highlight query */
+        HighlightBuilder highlightBuilder = new HighlightBuilder();
+
+        HighlightBuilder.Field highlightContent = new HighlightBuilder.Field("content");
+        highlightContent.highlighterType("unified");
+
+        highlightBuilder.field(highlightContent);
+
+        searchSourceBuilder.query(boolQueryBuilder).fetchSource(FETCH_FIELDS, null)
+                .highlighter(highlightBuilder);
+
+        searchRequest.indices(Book.INDEX_NAME);
+        searchRequest.source(searchSourceBuilder);
+
+        SearchResponse searchResponse = restHighLevelClient.search(searchRequest, RequestOptions.DEFAULT);
+
+        ArrayList<Book> foundBooks = new ArrayList<>();
+
+        for (SearchHit hit : searchResponse.getHits()) {
+            Map<String, HighlightField> highlightFields = hit.getHighlightFields();
+            HighlightField highlight = highlightFields.get("content");
+
+            Book book = new Gson().fromJson(hit.getSourceAsString(), Book.class);
+
+            if(Optional.ofNullable(highlight).isPresent()) {
+                Text[] fragments = highlight.fragments();
+                String contentHighlight = "";
+                for(Text text : fragments) {
+                    contentHighlight = contentHighlight + text.toString() + "\n";
+                }
+                book.setContent(contentHighlight);
+            } else {
+                book.setContent(book.getContent().substring(0, 200) + " ...");
+            }
+            foundBooks.add(book);
+        }
+
+        return new ResponseEntity<>(foundBooks, HttpStatus.OK);
+    }
+
     private File convert(MultipartFile file) throws IOException {
         File convertedFile = new File("pdf" + File.separator + file.getOriginalFilename());
         convertedFile.createNewFile();
@@ -80,6 +174,7 @@ public class BookService {
         fos.close();
         return convertedFile;
     }
+
     private DocumentHandler getHandler(String fileName) {
         if (fileName.endsWith(".txt")) return new TextDocHandler();
         if (fileName.endsWith(".pdf")) return new PDFHandler();
