@@ -1,2 +1,1 @@
-# myProject
- Elastic Search
+# Elastic Search backend app with serbian analyzer
