@@ -1,1 +1,3 @@
 # Elastic Search backend app with serbian analyzer
+
+Backend application that is intended to show how elastic search works based on certain parameters...
